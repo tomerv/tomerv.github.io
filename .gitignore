@@ -1,0 +1,9 @@
+.buildinfo
+_sources
+objects.inv
+
+# For now, don't publish these pages
+blog
+genindex
+search
+searchindex.js
