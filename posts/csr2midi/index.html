@@ -1,0 +1,185 @@
+
+<!DOCTYPE html>
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta charset="utf-8" />
+    <title>Reverse-engineering a Casio Piano File Format &#8212; Tomer Vromen</title>
+    <link rel="stylesheet" href="../../_static/haiku.css" type="text/css" />
+    <link rel="stylesheet" href="../../_static/pygments.css" type="text/css" />
+    <link rel="stylesheet" type="text/css" href="../../_static/css/custom.css" />
+    <script id="documentation_options" data-url_root="../../" src="../../_static/documentation_options.js"></script>
+    <script src="../../_static/jquery.js"></script>
+    <script src="../../_static/underscore.js"></script>
+    <script src="../../_static/doctools.js"></script>
+    <script src="../../_static/language_data.js"></script>
+    <script async="async" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/latest.js?config=TeX-AMS-MML_HTMLorMML"></script>
+    <link rel="shortcut icon" href="../../_static/favicon-16.png"/>
+    <link rel="author" title="About these documents" href="../../about/" />
+    <link rel="index" title="Index" href="../../genindex/" />
+    <link rel="search" title="Search" href="../../search/" />
+   
+  
+  <link rel="alternate" type="application/atom+xml"  href="../../blog/atom.xml" title="Tomer Vromen">
+  
+  
+  <style type="text/css">
+    ul.ablog-archive {list-style: none; overflow: auto; margin-left: 0px}
+    ul.ablog-archive li {float: left; margin-right: 5px; font-size: 80%}
+    ul.postlist a {font-style: italic;}
+    ul.postlist-style-disc {list-style-type: disc;}
+    ul.postlist-style-none {list-style-type: none;}
+    ul.postlist-style-circle {list-style-type: circle;}
+  </style>
+
+  </head><body>
+      <div class="header" role="banner"><h1 class="heading"><a href="../../">
+          <span>Tomer Vromen</span></a></h1>
+        <h2 class="heading"><span>Reverse-engineering a Casio Piano File Format</span></h2>
+      </div>
+      <div class="topnav" role="navigation" aria-label="top navigation">
+      
+        <p>
+        <a class="uplink" href="../../">Contents</a>
+        </p>
+
+      </div>
+      <div class="content" role="main">
+        
+        
+  <div class="section" id="reverse-engineering-a-casio-piano-file-format">
+<h1>Reverse-engineering a Casio Piano File Format<a class="headerlink" href="#reverse-engineering-a-casio-piano-file-format" title="Permalink to this headline">¶</a></h1>
+<p>I have a digital piano at home, the <a class="reference external" href="https://www.casio-europe.com/euro/products/musical-instruments/product-archive/privia-digital-pianos/px-130/">Casio PX-130</a>.
+It’s pretty old by now, but still very useful to me. I play it almost every day.</p>
+<p>It has some basic features: obviously it has piano keys, and they emit sounds when I press them. There are several possible tones for these sounds, things like grand piano and jazz organ. There’s a metronome. And there are some pre-recorded songs.</p>
+<p>The piano also allows me to record a song - but just one! Then I can play it back, or copy it via USB to a computer (the piano acts as a USB drive). At this point you would expect the transfered file to be a MIDI or MP3 file, right? Sadly, it’s not. It’s a CSR file, a proprietary format used by Casio. This was unexpected for me, because what’s the point of copying the song to a computer if you can’t do anything else with it?</p>
+<p>I searched the web for a tool to convert this CSR file to MIDI and found a few posts asking about this, but no solutions. This is where the hacker mindset kicked in. I decided to reverse engienner this file format, and create the obvious tool that should have been provided by Casio in the first place.</p>
+<p>Long story short (what’s called TL;DR these days): I wrote <a class="reference external" href="https://github.com/tomerv/csr2midi">csr2midi</a>, a tool for converting CSR to MIDI. Here I explain the process I used to reverse-engineer the CSR file format.</p>
+<div class="section" id="step-1-investigating">
+<h2>Step 1: Investigating<a class="headerlink" href="#step-1-investigating" title="Permalink to this headline">¶</a></h2>
+<p>How to start reverse-engineering a file format?</p>
+<p>The first step is to just think about it. Imagine yourself in the shoes of the programmer who’s in charge of designing this file. How would you do it?</p>
+<p>The file needs to hold all of the key presses and releases, with the correct timing and pressure. There are also some other things like the sustain pedal, the tone used (grand piano, electric piano, etc.), tempo setting, and so on. But it’s clear that the key presses and their timing are the main thing.</p>
+<p>The first idea that comes to mind is to divide the time to very small parts, and in each part (“frame”) record what happened. For example, divide each second to 1000 frames. The file would contain all the frames for the duration of the song. For each frame, if a key was pressed or released during a frame, it is recorded there. This is similar to the structure of a WAV file. But it’s completely wrong for our purpose.</p>
+<p>If the resolution is too low, then the playback might sound sloppy and out of time. If the resolution is too high, then many of the frames will be empty, making the file unnecessarily large. Then there’s the question of handling multiple key presses/releases in a single frame. It’s just not the correct data structure.</p>
+<p>Next idea: record in chronological order all the key presses, and between them write how much time passed. For example, if you press a key then wait 1 second and depress it, that’s 2 events with a time difference of 1 second between them. To record pressing 2 keys at the same time, just use a time difference of 0. The time difference can be with very high resolution without taking too much memory, since it’s just a single number.</p>
+<p>Okay, so that’s how I would do it, but is it how the Casio engineers did it? Before we go there, let’s consider another  aspect: the piano also has a MIDI-over-USB interface. That means I can connect it to a computer and the computer gets the key presses as MIDI events. Putting myself in the Casio engineer’s shoes again, I would probably want the CSR file format to be somewhat similar to the MIDI format, just to make things easier for me.</p>
+<p>The MIDI file format is an open format, and there are several guides out there on it <a class="footnote-reference brackets" href="#f1" id="id1">1</a>. A quick read of them shows that indeed the MIDI file format has a structure very similar to what I described: all the events are recorded in sequence, and between each two events there is a time difference.</p>
+</div>
+<div class="section" id="step-2-analysis">
+<h2>Step 2: Analysis<a class="headerlink" href="#step-2-analysis" title="Permalink to this headline">¶</a></h2>
+<p>Now we have an idea of what to expect. The next step is to record a song on the piano, take the file, and analyze it according to our expectations. This will either prove our hypothesis regarding the file structure, or send us back to drawing board.</p>
+<p>What kind of song should we record? The best option is probably not a real song, but rather something we can easily use to prove or disprove our theory about the file structure. One good option is just pressing a single key many times in a row. The repitition will make it easier for us to detect this sequence in the file.</p>
+<p>The CSR file is a binary file. A tool like xxd is useful for taking a quick look.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>$ xxd middle_c_many_times.CSR | head
+00000000: 5350 3546 5058 2d31 3330 2020 5602 0000  SP5FPX-130  V...
+00000010: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000020: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000030: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000040: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000050: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000060: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000070: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000080: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000090: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+</pre></div>
+</div>
+<p>We can see that the file starts with ASCII “SP5FPX-130  ” - that’s “SP5F” followed by the piano model and two spaces. So far makes sense. Then we see the two bytes 0x56 and 0x02 (turns out this is the size of the file). After that there are many null bytes. This is very common for a header of a file, and we’ll ignore it for now. Let’s jump down a bit, where we see a repeating pattern:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>00000290: f180 00f1 8000 f180 00f1 8000 f242 00f2  .............B..
+000002a0: 5292 ff01 003c 381d 3c00 293c 2b1b 3c00  R....&lt;8.&lt;.)&lt;+.&lt;.
+000002b0: 283c 2e1d 3c00 2c3c 241c 3c00 2a3c 271b  (&lt;..&lt;.,&lt;$.&lt;.*&lt;&#39;.
+000002c0: 3c00 2b3c 261b 3c00 2a3c 301d 3c00 2a3c  &lt;.+&lt;&amp;.&lt;.*&lt;0.&lt;.*&lt;
+000002d0: 271e 3c00 293c 361e 3c00 273c 361e 3c00  &#39;.&lt;.)&lt;6.&lt;.&#39;&lt;6.&lt;.
+000002e0: 283c 3c1b 3c00 2b3c 381b 3c00 2b3c 2e19  (&lt;&lt;.&lt;.+&lt;8.&lt;.+&lt;..
+000002f0: 3c00 2b3c 3119 3c00 2c3c 2b19 3c00 2f3c  &lt;.+&lt;1.&lt;.,&lt;+.&lt;./&lt;
+00000300: 2016 3c00 2e3c 2519 3c00 293c 3519 3c00   .&lt;..&lt;%.&lt;.)&lt;5.&lt;.
+00000310: 283c 3a1d 3c00 253c 3b1d 3c00 273c 3a1e  (&lt;:.&lt;.%&lt;;.&lt;.&#39;&lt;:.
+00000320: 3c00 273c 371c 3c00 273c 3f1f 3c00 1f3c  &lt;.&#39;&lt;7.&lt;.&#39;&lt;?.&lt;..&lt;
+00000330: 3616 3c00 63fc 0000 fc00 00fc 0000 fc00  6.&lt;.c...........
+</pre></div>
+</div>
+<p>The pattern is easily seen with the naked eye due to all the 0x35 bytes appearing as “&lt;” in ASCII. It has a cycle of 6 bytes, and if we search for where it begins we can understand its structure:</p>
+<blockquote>
+<div><p><span class="hy">3c</span> 38 1d <span class="hy">3c</span> <span class="hc">00</span> 29</p>
+</div></blockquote>
+<p>In this recording I pressed (and released) the middle C note many times. It just so happens that 3c is value of middle C in MIDI. This is a really big hint! The first 2 bytes are the note and the pressure, the next byte is the delay, and the 2 bytes after that are again the note and pressure (middle C release, i.e. pressure 0), and then the delay to the next event. And since middle C in CSR is the same as in MIDI, we can assume that this is true for the rest of the notes as well - less work for us!</p>
+<p>At this point, we actually have enough knowledge to extract all the important information from the file, as long as we know where it starts in the file. Where it starts is actually a bit complicated. But if we look before all the middle C presses, we see a pattern of “f1 80 00” repeating 12 times. I ended up using this as a marker for finding the start of the data.</p>
+</div>
+<div class="section" id="step-3-the-devil-is-in-the-details">
+<h2>Step 3: The Devil is in the Details<a class="headerlink" href="#step-3-the-devil-is-in-the-details" title="Permalink to this headline">¶</a></h2>
+<p>We cracked the main part, but it’s still far from over:</p>
+<ul class="simple">
+<li><p>How are delays expressed? This determines the speed of the recording.</p></li>
+<li><p>What if there is a really big delay between events, too big to fit in a single byte? How is it encoded?</p></li>
+<li><p>How is the pressure of notes calculated? Is it the same as in MIDI? (Turns out it’s the same)</p></li>
+<li><p>How are pedal presses and releases recorded?</p></li>
+<li><p>How is the “metadata” recorded, for example tempo and tone?</p></li>
+<li><p>The PX-130 has 2 recording channels - how is that handled?</p></li>
+<li><p>And more…</p></li>
+</ul>
+<p>Answering each of these questions requires coming up with an appropriate “experiment”: a file that can help find the answer.</p>
+<p>For example, to understand the enconding of delays we can record a “song” of just holding a single note for exactly 1 second. Then we look at the delay that was recorded between the key press and release, and that is the delay for 1 second. We can probably assume that delays are linear, so a delay of 1/2 second would be 1/2 of that number.</p>
+<p>To find how big delays are encoded, hold a single note for 10 seconds (or for 100 seconds), then release.</p>
+<p>To find how the tempo is recorded, record a song with some arbitrary tempo, say 77, and look for that number in the file. If that doesn’t work out, record 2 simialr songs except with a different tempo and look for differences when comparing the files. Luckily, that wasn’t needed, since the tempo is simply saved as a single byte in the file (this also means that the maximal tempo is 255, and the instruction manual confirms this).</p>
+<p>Getting all that infromation turned out to be quite a lot of work. Mainly because the PX-130 can only record one song each time. This means recording some “experiment”, connecting the piano to the computer, copying the file, disconnecting. Repeat times 100. Just getting the encondings of all the tones (there are 14) probably took around half an hour of recording-connecting-disconnecting cycles.</p>
+<p>I won’t detail all the steps here, because it gets boring fast. I summarized all my findings in the <a class="reference external" href="https://github.com/tomerv/csr2midi/blob/main/doc/csr-file-structure.md">project repo</a>. There’s still some more detials I haven’t figured out, but the main things are supported.</p>
+</div>
+<div class="section" id="step-4-converting">
+<h2>Step 4: Converting<a class="headerlink" href="#step-4-converting" title="Permalink to this headline">¶</a></h2>
+<p>By now we might have forgotten the purpose of this whole exercise, which is to get the data out into a normal format, like a MIDI file.</p>
+<p>Converting to MIDI is pretty straightforward thanks to the similarities between the two formats. The only sligh complication is the calculation of delays, which is a bit different between CSR and MIDI.</p>
+<p>I used <a class="reference external" href="https://mido.readthedocs.io/en/latest/">mido</a> to output to MIDI file. I didn’t have any special requirements, so probably any library for handling MIDI files would have worked just as well.</p>
+</div>
+<div class="section" id="summary">
+<h2>Summary<a class="headerlink" href="#summary" title="Permalink to this headline">¶</a></h2>
+<p>I finished coding this - it’s less than 300 lines of Python - and tested it on some samples. So far it works pretty well.</p>
+<p>There are still some things I didn’t figure out in the CSR file format. One of them is a huge block in the header for which I just didn’t understand the purporse. It would stay constant in some recordings, then suddenly change to something else, and I couldn’t explain why.</p>
+<p>Another thing - which I still want to tackle at some point - is tone layering and splitting. The PX-130 allows to record with 2 tones at the same time, for example the lower part of the keyboard can be a bass tone and the higher part an electric piano. I still want to reverse how this information is encoded in the file.</p>
+<p>Overall, this has been a fun experience. It’s not every day that I encounter such a challenge that has real-life use. Hopefully, it will also help someone get their song off their Casio piano!</p>
+<p class="rubric">Footnotes</p>
+<dl class="footnote brackets">
+<dt class="label" id="f1"><span class="brackets"><a class="fn-backref" href="#id1">1</a></span></dt>
+<dd><p>I found this one very helpful: <a class="reference external" href="https://www.personal.kent.edu/~sbirch/Music_Production/MP-II/MIDI/midi_file_format.htm">https://www.personal.kent.edu/~sbirch/Music_Production/MP-II/MIDI/midi_file_format.htm</a></p>
+</dd>
+</dl>
+</div>
+</div>
+
+  <div class="section">
+  
+    
+
+
+<div class="section">
+  <span style="float: left;">
+  
+  Previous: 
+  <a href="../food-ingredients/">
+    
+    Food Ingredients as Linear Programming
+  </a>
+  
+  </span>
+  <span>&nbsp;</span>
+  <span style="float: right;">
+  
+  </span>
+</div>
+
+  
+  
+  </div>
+
+      </div>
+      <div class="bottomnav" role="navigation" aria-label="bottom navigation">
+      
+        <p>
+        <a class="uplink" href="../../">Contents</a>
+        </p>
+
+      </div>
+
+    <div class="footer" role="contentinfo">
+    </div>
+  </body>
+</html>
